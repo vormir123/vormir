@@ -8,6 +8,7 @@ export const DEFAULT_ENV = {
     port: process.env.vormir_PORT || 3000,
     logLevel:
         process.env.vormir_LOG_LEVEL || process.env.NODE_ENV === "development" ? "silly" : "info",
+    vormirDebug: process.env.DEBUG || process.env.NODE_ENV === "development" ? "silly" : "info",
     configDir: process.env.vormir_CONFIG_DIR || "../vormir.runtime-config.json",
     serveAssets: process.env.vormir_SERVE_ASSET || false,
     serveAssetsURL: process.env.vormir_SERVER_ASSET_URL || "/static"
