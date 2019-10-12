@@ -33,7 +33,9 @@ if (process.env.vormir_BUILD_ENV.graphql !== false) {
     getDataFromTree = require("react-apollo").getDataFromTree;
     mergeApolloConfig = require("@vormir/util/graphql").mergeApolloConfig;
     customGraphQLClientConfig = require("../shared/graphql/config").default;
-
+    if (process.env.DEBUG) {
+        console.log("debug")
+    }
     withApolloClient = (req, res) => {
         const { apolloHeader: reqApolloHeader } = req;
 
