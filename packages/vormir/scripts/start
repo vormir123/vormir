@@ -1,0 +1,220 @@
+#!/usr/bin/env node
+//# vi: ft=javascript
+const chalk = require("chalk"),
+    kill = require("kill-port"),
+    path = require("path"), 
+    webpack = require("webpack"),
+    WebpackDevServer = require("webpack-dev-server"),
+    chokidar = require("chokidar"),
+    fs = require("fs-extra"),
+    ROOT_PATH = process.cwd(),
+    logger = require("./util/logger"),
+    reRequire =  require("./util/re-require"),
+    checkTypescript = require("./util/checkTypescript"),
+    generateTSConfig = require("./util/generateTSConfig"),
+    isTSFileExists = require("./util/isTSFileExists"),
+    clean = require("./clean"),
+    RESOLVER = require("../resolver"),
+    WebpackDevServerUtils = require("react-dev-utils/WebpackDevServerUtils"),
+    getProcessForPort = require("react-dev-utils/getProcessForPort");
+
+let loadvormirConfig,
+    assetsDevServer,
+    vormirDevServer,
+    isReload = false;
+
+/**
+ * A function to load config and start webpack development servers.
+ * @param argv start command arguments
+ * @param useTypescript is .(ts|tsx) files found
+ */
+const startDevServers = (argv, useTypescript) => {
+    if(!assetsDevServer && !vormirDevServer) {
+        clean(argv, () => {
+            loadvormirConfig = reRequire(path.resolve(__dirname, "./util/load-config"));
+            const vormirConfig = loadvormirConfig(),
+                { webpack: webpackConfig } = vormirConfig,
+                [serverCompiler, clientCompiler] = webpack([webpackConfig.server, webpackConfig.client]).compilers,
+                configPath = path.resolve(ROOT_PATH, "./vormir.config.js"),
+                configPathTypescript = path.resolve(ROOT_PATH, "./vormir.config.ts");
+            logger("debug", "Initiating build with the following config...");
+            if(process.env.vormir_SCRIPT_DEBUG) {
+                //eslint-disable-next-line
+                console.log(vormirConfig);
+            }
+
+            // Generate tsconfig.json if ts/tsx files found in projects
+            if (useTypescript && fs.existsSync(configPath)) {
+                generateTSConfig(configPath);
+            } else if (useTypescript && fs.existsSync(configPathTypescript)) {
+                generateTSConfig(configPathTypescript);
+            }
+
+            logger("log", `Starting vormir Dev Server on ${process.env.vormir_HOST}:${process.env.vormir_PORT}`);
+            vormirDevServer = serverCompiler.watch(webpackConfig.server.watchOptions, (err, stats) => {
+                if (err) {
+                    logger("error", err.stack || err);
+                    if (err.details) {
+                        logger("error", err.details.toString());
+                    }
+                    return;
+                }
+
+                const info = stats.toJson();
+
+                if (stats.hasErrors()) {
+                    logger("error", info.errors);
+                }
+
+                if (stats.hasWarnings()) {
+                    logger("warn", info.warnings);
+                }
+                //eslint-disable-next-line
+                console.log(
+                    stats.toString({
+                        modules: false,
+                        colors: true
+                    })
+                );
+            });
+            let devPort,
+                devHost;
+
+            if(webpackConfig.client.devServer) {
+                devPort = webpackConfig.client.devServer.port;
+                devHost = webpackConfig.client.devServer.host;
+            }
+
+            assetsDevServer = new WebpackDevServer(clientCompiler, webpackConfig.client.devServer);
+
+            assetsDevServer.listen(devPort, devHost);
+        });
+    }
+}
+
+/**
+ * A function to stop current running development servers.
+ * @param argv start command arguments
+ * @param cb callback function on stop
+ */
+const stopDevServers = (argv, cb) => {
+    if(vormirDevServer) {
+        vormirDevServer.close(() => {
+            logger("debug", "Closing vormir Dev Server...");
+        });
+    }
+    if(assetsDevServer) {
+        assetsDevServer.close(() => {
+            logger("debug", "Closing Webpack Dev Server...");
+        });
+    }
+    if(cb) {
+        kill(process.env.vormir_PORT).then(() => {
+            assetsDevServer = undefined;
+            vormirDevServer = undefined;
+            cb();
+        })
+    }
+}
+
+/**
+ * A function to reload, happened when detect changes on config files.
+ * @param argv start command arguments
+ * @param useTypescript is .(ts|tsx) files exists
+ */
+const reloadDevServers = (argv, useTypescript) => {
+    if(!isReload) {
+        isReload = true;
+        stopDevServers(argv, () => {
+            startDevServers(argv, useTypescript);
+            isReload = false;
+        });
+    }
+}
+
+/**
+ * vormir start main command. Starting development server.
+ * @param argv start command arguments
+ */
+const start = argv => {
+    const userPort = argv.port || 3000;
+
+    //Verify typescript process before starting projects.
+    const useTypescript = isTSFileExists();
+    checkTypescript(useTypescript);
+
+    getProcessForPort(userPort);
+    WebpackDevServerUtils.choosePort("localhost", userPort).then(resolvedPort => {
+        if(resolvedPort !== null) {
+            process.env.vormir_HOST = argv.host || "http://localhost";
+            process.env.NODE_ENV = argv.env || "development";
+            process.env.vormir_PORT = parseInt(resolvedPort, 10);
+            process.env.WDS_PORT = argv.wdsport || resolvedPort + 1;
+            try {
+                if(argv.debug) {
+                    process.env.vormir_SCRIPT_DEBUG = true;
+                }
+
+                const entryFiles = Object.keys(RESOLVER).reduce((accumulator, key) => {
+                        const buildPath = useTypescript ? RESOLVER[key].customTypescript : RESOLVER[key].custom;
+                        accumulator.push(buildPath);
+                        return accumulator;
+                    }, []),
+                    configFiles = [
+                        path.resolve(ROOT_PATH, "./vormir.config.js"),
+                        path.resolve(ROOT_PATH, "./vormir.config.ts"),
+                        path.resolve(ROOT_PATH, "./.babelrc")
+                    ];
+
+                const watcher = chokidar.watch([...configFiles, ...entryFiles], {
+                    ignoreInitial: true
+                });
+                logger("clear");
+                logger("debug", "Watching files...");
+                logger( "debug", [...configFiles, ...entryFiles].join("\n"));
+
+                watcher.on("change",  changedPath => {
+                    if(configFiles.indexOf(changedPath) !== -1) {
+                        if(!isReload) {
+                            logger("clear");
+                        }
+                        logger("log", `${chalk.green(changedPath)} Changed, reloading....`);
+                        reloadDevServers(argv, useTypescript);
+                    }
+                }).on("add", changedPath => {
+                    if(!isReload) {
+                        logger("clear");
+                    }
+                    logger("log", `${chalk.green(changedPath)} added, reloading....`);
+                    reloadDevServers(argv, useTypescript);
+                }).on("unlink", changedPath => {
+                    if(!isReload) {
+                        logger("clear");
+                    }
+                    logger("log", `${chalk.green(changedPath)} removed, reloading....`);
+                    reloadDevServers(argv, useTypescript);
+                }).on("addDir", changedPath => {
+                    if(!isReload) {
+                        logger("clear");
+                    }
+                    logger("log", `${chalk.green(changedPath)} added, reloading....`);
+                    reloadDevServers(argv, useTypescript);
+                }).on("unlinkDir", changedPath => {
+                    if(!isReload) {
+                        logger("clear");
+                    }
+                    logger("log", `${chalk.green(changedPath)} removed, reloading....`);
+                    reloadDevServers(argv, useTypescript);
+                });
+
+                startDevServers(argv, useTypescript);
+            } catch (err) {
+                logger("error", err);
+            }
+        } else {
+            logger("log", "No ports available for starting Dev Server, exiting....");
+        }
+    })
+}
+
+module.exports = start;

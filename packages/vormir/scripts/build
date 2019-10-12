@@ -1,0 +1,104 @@
+#!/usr/bin/env node
+//# vi: ft=javascript
+const logger = require("./util/logger"), 
+    webpack = require("webpack"),
+    clean = require("./clean"),
+    fs = require("fs-extra"),
+    path = require("path"),
+    ROOT_PATH = process.cwd();
+
+const build = argv => {
+    try {
+        process.env.NODE_ENV = argv.env || "development";
+        process.env.vormir_PORT = argv.port || 3000;
+        process.env.WDS_PORT = argv.wdsport || 3001;
+
+        if(argv.debug) {
+            process.env.vormir_SCRIPT_DEBUG = true;
+        }
+        if(argv.analyze && argv.target) {
+            process.env.WEBPACK_OP = "analyze";
+        } else if(argv.analyze) {
+            logger("warn", "No Target Specified, can't analyze");
+            process.exit(1);
+        }
+
+        process.env.NODE_ENV = argv.env || "production";
+
+        const webpackBuild = (config, cb) => webpack(config, (err, stats) => {
+            if (err) {
+                logger("error", err.stack || err);
+                if (err.details) {
+                    logger("error", err.details.toString());
+                }
+                return;
+            }
+
+            const info = stats.toJson();
+
+            if (stats.hasErrors()) {
+                logger("error", info.errors);
+            }
+
+            if (stats.hasWarnings()) {
+                logger("warn", info.warnings);
+            }
+            console.log(
+                stats.toString({
+                    modules: false,
+                    colors: true
+                })
+            );
+            if(cb) {
+                cb()
+            }
+        });
+
+        clean(argv, () => {
+            const loadvormirConfig = require("./util/load-config"),
+                checkTypescript = require("./util/checkTypescript"),
+                generateTSConfig = require("./util/generateTSConfig"),
+                isTSFileExists = require("./util/isTSFileExists"),
+                { webpack: webpackConfig } = loadvormirConfig(),
+                configs = [webpackConfig.server, webpackConfig.client],
+                useTypescript = isTSFileExists(),
+                userConfigPath = path.resolve(ROOT_PATH, "./vormir.config.js"),
+                userConfigPathTypescript = path.resolve(ROOT_PATH, "./vormir.config.ts");;
+
+            // Check typescript dependencies
+            checkTypescript(useTypescript);
+
+            // Generate tsconfig.json if ts/tsx files found in projects
+            if (useTypescript && fs.existsSync(userConfigPath)) {
+                generateTSConfig(userConfigPath);
+            } else if (useTypescript && fs.existsSync(userConfigPathTypescript)) {
+                generateTSConfig(userConfigPathTypescript);
+            }
+
+            if(process.env.WEBPACK_OP === "analyze") {
+                logger("log", `Analyze build target ${argv.target} for ${process.env.NODE_ENV} environment`);
+            } else {
+                logger("log", `Building project${argv.target ? ` with target ${argv.target}` : ""} for ${process.env.NODE_ENV} environment`);
+            }
+
+            switch(argv.target) {
+                case "server":
+                    webpackBuild(webpackConfig.server);
+                    break;        
+                case "client":
+                    webpackBuild(webpackConfig.client);
+                    break;
+                default:
+                    if(!argv.target) {
+                        webpackBuild(configs);
+                    } else {
+                        logger("warn", "Target unknown, can't build!");
+                    }
+            }
+        });
+    } catch(err) {
+        logger("error", err);
+    }
+}
+
+module.exports = build;
